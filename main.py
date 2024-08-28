@@ -15,90 +15,90 @@ from gevent import monkey
 monkey.patch_all()
 import requests
 
-# Global variables
+# global variables
 task_queue = queue.Queue()
 result_queue = queue.Queue()
 lock = threading.Lock()
-STOP_THIS = False
-alive = True  # To handle safe exit of threads and coroutines
 
 
 def report_result():
-    """Handles saving of scan results to files."""
     dirPath = './report'
     if not os.path.exists(dirPath):
         os.mkdir(dirPath)
-
-    cdnHost = os.path.join(dirPath, f'cdnHost_{time.strftime("%Y%m%d", time.localtime())}.txt')
-    realHost = os.path.join(dirPath, f'realHost_{time.strftime("%Y%m%d", time.localtime())}.txt')
-    errorHost = os.path.join(dirPath, f'errorHost_{time.strftime("%Y%m%d", time.localtime())}.txt')
+    cdnHost = dirPath + '/' + 'cdnHost_' + \
+        time.strftime('%Y%m%d', time.localtime()) + '.txt'
+    realHost = dirPath + '/' + 'realHost_' + \
+        time.strftime('%Y%m%d', time.localtime()) + '.txt'
+    errorHost = dirPath + '/' + 'errorHost_' + \
+        time.strftime('%Y%m%d', time.localtime()) + '.txt'
     all_result = []
 
-    global STOP_THIS, alive
+    # 处理输出 / Handle output
+    global STOP_THIS
 
     try:
-        while alive and not STOP_THIS:
-            if result_queue.empty():
+        while not STOP_THIS:
+            if result_queue.qsize() == 0:
                 time.sleep(0.1)
                 continue
-
-            while not result_queue.empty():
+            while result_queue.qsize() > 0:
                 all_result.append(result_queue.get())
 
-            cdn_text, real_text, error_text = '', '', ''
+            cdn_text = ''
+            real_text = ''
+            error_text = ''
             for item in all_result:
                 if item['isCdn'] is True:
-                    cdn_text += f"{item['host']}\nip: {', '.join(item['ip'])}\n"
+                    cdn_text += item['host'] + '\n'
+                    cdn_text += 'ip:' + ','.join(list(item['ip'])) + '\n'
                 elif item['isCdn'] is False:
-                    real_text += f"{item['host']}\nip: {', '.join(item['ip'])}\n"
+                    real_text += item['host'] + '\n'
+                    real_text += 'ip:' + ''.join(list(item['ip'])) + '\n'
                 else:
-                    error_text += f"{item['host']}\n"
+                    error_text += item['host'] + '\n'
 
-            try:
-                with open(cdnHost, 'w') as f1, open(realHost, 'w') as f2, open(errorHost, 'w') as f3:
-                    f1.write(cdn_text)
-                    f2.write(real_text)
-                    f3.write(error_text)
-            except Exception as e:
-                print(f"[保存结果时出错/Save result error]: {e}")
-
-            # 清空已处理的结果 / Clear processed results
-            all_result.clear()
+            with open(cdnHost, 'w') as f1, open(realHost, 'w') as f2, open(
+                errorHost, 'w'
+            ) as f3:
+                f1.write(cdn_text)
+                f2.write(real_text)
+                f3.write(error_text)
 
         if all_result:
-            print(f"[扫描报告保存到/Scan report saved to]: {cdnHost} {realHost} {errorHost}")
+            print(
+                '[扫描报告已保存到]:{c} {r} {e}'.format(
+                    c=cdnHost, r=realHost, e=errorHost
+                )
+            )
         else:
-            print("[错误，结果为空/Error, results are empty]")
+            print('[错误，结果为空]')
+
     except Exception as e:
-        print(f"[保存结果线程错误/Error in result saving thread]: {e}")
+        print('[保存结果线程错误]: {}'.format(e))
         sys.exit(-1)
 
 
 def format_producer(args):
-    """Reads targets from input arguments or files and adds them to the task queue."""
     lines = []
     if args.host:
         lines.append(args.host.strip())
 
     if args.force and args.f:
-        try:
-            with open(args.f, 'r') as inFile:
-                content = inFile.read()
-            pattern = re.compile(
-                r'([a-zA-Z0-9][-a-zA-Z0-9]{0,62}(\.[a-zA-Z0-9][-a-zA-Z0-9]{0,62})+\.[a-z]+?)\s'
-            )
-            resList = pattern.findall(content)
-            for h in resList:
-                lines.append(h[0])
-        except Exception as e:
-            print(f'[错误强制模式/Error in force mode]: {e}')
+        with open(args.f, 'r') as inFile:
+            content = inFile.read()
+        pattern = re.compile(
+            r'([a-zA-Z0-9][-a-zA-Z0-9]{0,62}(\.[a-zA-Z0-9][-a-zA-Z0-9]{0,62})+\.[a-z]+?)\s'
+        )
+        resList = pattern.findall(content)
+        for h in resList:
+            try:
+                lines.append(list(h)[0])
+            except Exception as e:
+                print('[强制模式错误]:{}'.format(e))
 
     elif args.f:
-        try:
-            with open(args.f, 'r') as inFile:
-                lines += [line.strip() for line in inFile.readlines()]
-        except Exception as e:
-            print(f'[文件读取错误/File reading error]: {e}')
+        with open(args.f, 'r') as inFile:
+            lines += map(lambda x: x.strip(), inFile.readlines())
 
     # 去重 / Remove duplicates
     lines = list(set(lines))
@@ -110,26 +110,21 @@ def format_producer(args):
 
 
 def consumer(bar):
-    """Handles the execution of each task in the task queue."""
-    global target, alive
-    while alive:
+    while True:
         try:
             target = task_queue.get(timeout=0.5)
-        except queue.Empty:
-            break
+        except:
+            if task_queue.empty():
+                break
 
-        # Handle individual task execution
-        try:
-            thread_worker(target)
-        except Exception as e:
-            print(f'[Consumer Error]: {e}')
-        finally:
-            with lock:
-                bar()  # Update progress bar
+        thread_worker(target)
+        # 显示进度 / Show the progress
+        lock.acquire()
+        bar()
+        lock.release()
 
 
 def get_nodes(host):
-    """Fetches the list of nodes for a given host."""
     req_url = 'https://wepcc.com:443/'
     req_headers = {
         'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8'}
@@ -139,40 +134,44 @@ def get_nodes(host):
     }
     node_pattern = re.compile(r'data-id="(\w+?)"')
     try:
-        req = requests.post(url=req_url, headers=req_headers, data=param_body, timeout=5)
+        req = requests.post(url=req_url, headers=req_headers, data=param_body)
         if req.status_code == 200:
             return node_pattern.findall(req.text)
         else:
-            print(f"获取节点错误: {req.status_code}/get_nodes Error: {req.status_code}")
+            print(f"获取节点错误:{req.status_code}")  # Get nodes error
     except Exception as e:
-        print(f"[获取节点错误/Error getting nodes]: {e}")
+        print(e)
     return []
 
 
 def thread_worker(host):
-    """Executes the worker function for each host using gevent."""
     nodes = get_nodes(host)
     my_set = set()
     try:
-        jobs = [gevent.spawn(gevent_worker, host, node, my_set) for node in nodes]
-        gevent.joinall(jobs, timeout=20, raise_error=True)
-
-        isCdn = True if len(my_set) > 1 else (False if my_set else 'Error')
+        jobs = [gevent.spawn(gevent_worker, host, node, my_set)
+                for node in nodes]
+        gevent.joinall(jobs, timeout=20)
+        # print([job.value for job in jobs])
+        if my_set:
+            isCdn = True if len(my_set) > 1 else False
+        else:
+            isCdn = '错误'  # Error
         result = {'host': host, 'isCdn': isCdn, 'ip': my_set}
+        print(result)
+        # 将结果放入结果队列 / Put the result into result_queue
         result_queue.put(result)
 
     except Exception as e:
-        print(f'[错误线程工作/Error in thread worker]: {e}')
+        print('[线程工作错误]: {}'.format(e))
 
 
 def gevent_worker(host, node, my_set):
-    """Individual gevent worker to ping a host from a specific node."""
     req_url = 'https://wepcc.com:443/check-ping.html'
     req_headers = {
         'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8'}
-    param_body = f'node={node}&host={host}'
+    param_body = 'node={n}&host={h}'.format(n=node, h=host)
     try:
-        req = requests.post(url=req_url, data=param_body, headers=req_headers, timeout=5)
+        req = requests.post(url=req_url, data=param_body, headers=req_headers)
         if req.status_code == 200:
             try:
                 json_data = json.loads(req.content)
@@ -183,51 +182,53 @@ def gevent_worker(host, node, my_set):
                     my_set.add(ip)
                     return True
                 else:
-                    print(f"{host}: {json_data.get('msg')}")
+                    print(f"{host}:{json_data.get('msg')}")
                 return False
             except Exception as e:
-                print(f'[错误解析 JSON {host}]: {e}/Error parsing JSON {host}: {e}')
+                print('[Gevent 工作线程解析 {host} Json 错误]: {error}'.format(
+                    host=host, error=e))
         else:
-            print(f"请求错误状态码: {req.status_code}/Request error status code: {req.status_code}")
+            print(req.status_code)
     except Exception as e:
-        print(f'[Gevent Worker 错误/Error in Gevent Worker]: {e}')
+        print('[主程序 Gevent 工作线程错误]: {}'.format(e))
         time.sleep(0.5)
+
     return False
 
 
 def parse_args():
-    """Parses command line arguments for input configuration."""
     parser = ArgumentParser(
         prog='morePing',
         formatter_class=RawTextHelpFormatter,
-        description='* 一种高速CDN检测器 / A high-speed CDN detector *\n',
-        usage='morePing.py [options]',
+        description='* 高速 CDN 检测工具 *\n',
+        usage='morePing.py [选项]',
     )
     parser.add_argument(
         '--host',
         metavar='HOST',
         type=str,
         default='',
-        help='从命令行扫描主机/Scan host from command line',
+        help='从命令行扫描主机 / Scan host from command line',
     )
     parser.add_argument(
         '-f',
         metavar='TargetFile',
         type=str,
         default='',
-        help='从TargetFile加载新的行分隔的目标/Load newline-separated targets from TargetFile',
+        help='从目标文件加载新行分隔的目标 / Load new line delimited targets from TargetFile',
     )
     parser.add_argument(
         '-p',
         metavar='PROCESS',
         type=int,
         default=10,
-        help='并发运行的进程数，默认为10/Number of concurrent processes, default is 10',
+        help='并发运行的进程数量，默认为 10 / Number of processes running concurrently, 10 by default',
     )
     parser.add_argument(
-        '--force', action='store_true', help='强制从不规则文本中提取主机/Force extraction of hosts from irregular text'
+        '--force', action='store_true', help='强制从不规则文本中提取主机 / Force to extract host from irregular Text'
     )
-    parser.add_argument('-v', action='version', version='%(prog)s 1.0    By xq17')
+    parser.add_argument('-v', action='version',
+                        version='%(prog)s 1.1.0 By codervibe')
 
     if len(sys.argv) == 1:
         sys.argv.append('-h')
@@ -237,67 +238,51 @@ def parse_args():
 
 
 def check_args(args):
-    """Validates the input arguments to ensure correct file paths and targets."""
     if not args.host and not args.f:
-        print('Args失踪!——请使用 --host baidu.com 或 -f host.txt 指定目标/Args missing! Use --host baidu.com or -f host.txt to specify targets')
+        msg = '参数缺失！--host baidu.com 或 -f host.txt 未找到 / Args missing! --host baidu.com or -f host.txt not found'
+        print(msg)
         exit(-1)
 
     if args.f and not os.path.isfile(args.f):
-        print(f'目标文件未找到: {args.f}/Target file not found: {args.f}')
+        print('目标文件未找到: {file}'.format(file=args.f))  # TargetFile not found
 
 
 def main():
-    """Main function to initialize and run the scanning process."""
     args = parse_args()
     print('* MorePing v1.0  https://github.com/xq17/MorePing *')
-    print('* 正在准备生成任务... / Preparing to generate tasks... *')
+    print('* 准备生成任务..... * / * preparing to generate task..... *')
     format_producer(args)
     target_count = task_queue.qsize()
-    print(f'{target_count} 个目标已加入队列./{target_count} targets entered the queue.')
+    print('{} 个目标已进入队列. / {} targets entered Queue.'.format(target_count, target_count))
     thread_count = args.p
-    print(f'创建 {thread_count} 个子进程.../Creating {thread_count} subprocesses...')
+    print('创建 {} 个子进程... / Creating {} sub Processes...'.format(thread_count, thread_count))
     scan_process = []
-    print('报告线程正在运行.../Report thread is running...')
-    global STOP_THIS, alive
+    print('报告线程正在运行... / Report thread running...')
+    global STOP_THIS
     STOP_THIS = False
-    alive = True
 
-    # Start the result reporting thread
-    result_thread = threading.Thread(target=report_result)
-    result_thread.start()
-
+    threading.Thread(target=report_result).start()
     try:
         with alive_bar(target_count) as bar:
             for _ in range(thread_count):
-                thread = threading.Thread(target=consumer, args=(bar,))
-                thread.start()
-                scan_process.append(thread)
+                t = threading.Thread(target=consumer, args=(bar,), daemon=True)
+                t.start()
+                scan_process.append(t)
+            print('{} 个子进程成功启动. / {} sub processes started successfully.'.format(thread_count, thread_count))
+            for t in scan_process:
+                t.join()
+    except KeyboardInterrupt as e:
+        time.sleep(0.5)
+        print('[+] 用户中断，子扫描进程退出.. / [+] User interrupted, child scan processes exit..')
 
-            for thread in scan_process:
-                thread.join()
-
-        # Clean exit handling
-        STOP_THIS = True
-        alive = False
-        result_thread.join()
-
-    except KeyboardInterrupt:
-        print('用户退出.../User exit...')
-        STOP_THIS = True
-        alive = False
-        for thread in scan_process:
-            thread.join()
-        time.sleep(1)
-        sys.exit(-1)
     except Exception as e:
-        print(f'[主进程错误/Error in main process]: {type(e)} {e}')
-        STOP_THIS = True
-        alive = False
+        print('[__main__.异常]: {type} {error}'.format(
+            type=type(e), error=e))
 
+    # 将结果输出到文件 / Output result to file
     STOP_THIS = True
-    alive = False
-    time.sleep(0.5)
+    time.sleep(1)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

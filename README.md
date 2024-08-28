@@ -21,7 +21,7 @@ options:
   --force        强制从不规则文本中提取主机/Force extraction of hosts from irregular text
   -v             show program's version number and exit
 ~~~
-#### 示例
+
 #### Example
 
 ```
