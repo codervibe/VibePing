@@ -15,14 +15,16 @@ from gevent import monkey
 monkey.patch_all()
 import requests
 
-# global variables
+# Global variables
 task_queue = queue.Queue()
 result_queue = queue.Queue()
 lock = threading.Lock()
 STOP_THIS = False
+alive = True  # To handle safe exit of threads and coroutines
 
 
 def report_result():
+    """Handles saving of scan results to files."""
     dirPath = './report'
     if not os.path.exists(dirPath):
         os.mkdir(dirPath)
@@ -32,10 +34,10 @@ def report_result():
     errorHost = os.path.join(dirPath, f'errorHost_{time.strftime("%Y%m%d", time.localtime())}.txt')
     all_result = []
 
-    global STOP_THIS
+    global STOP_THIS, alive
 
     try:
-        while not STOP_THIS:
+        while alive and not STOP_THIS:
             if result_queue.empty():
                 time.sleep(0.1)
                 continue
@@ -73,6 +75,7 @@ def report_result():
 
 
 def format_producer(args):
+    """Reads targets from input arguments or files and adds them to the task queue."""
     lines = []
     if args.host:
         lines.append(args.host.strip())
@@ -107,21 +110,26 @@ def format_producer(args):
 
 
 def consumer(bar):
-    global target
-    while True:
+    """Handles the execution of each task in the task queue."""
+    global target, alive
+    while alive:
         try:
             target = task_queue.get(timeout=0.5)
         except queue.Empty:
             break
 
-        thread_worker(target)
-
-        # 进度条更新 / Update progress bar
-        with lock:
-            bar()
+        # Handle individual task execution
+        try:
+            thread_worker(target)
+        except Exception as e:
+            print(f'[Consumer Error]: {e}')
+        finally:
+            with lock:
+                bar()  # Update progress bar
 
 
 def get_nodes(host):
+    """Fetches the list of nodes for a given host."""
     req_url = 'https://wepcc.com:443/'
     req_headers = {
         'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8'}
@@ -131,7 +139,7 @@ def get_nodes(host):
     }
     node_pattern = re.compile(r'data-id="(\w+?)"')
     try:
-        req = requests.post(url=req_url, headers=req_headers, data=param_body)
+        req = requests.post(url=req_url, headers=req_headers, data=param_body, timeout=5)
         if req.status_code == 200:
             return node_pattern.findall(req.text)
         else:
@@ -142,17 +150,15 @@ def get_nodes(host):
 
 
 def thread_worker(host):
+    """Executes the worker function for each host using gevent."""
     nodes = get_nodes(host)
     my_set = set()
     try:
         jobs = [gevent.spawn(gevent_worker, host, node, my_set) for node in nodes]
-        gevent.joinall(jobs, timeout=20)
+        gevent.joinall(jobs, timeout=20, raise_error=True)
 
         isCdn = True if len(my_set) > 1 else (False if my_set else 'Error')
         result = {'host': host, 'isCdn': isCdn, 'ip': my_set}
-        print(result)
-
-        # 结果加入队列 / Add results to the queue
         result_queue.put(result)
 
     except Exception as e:
@@ -160,12 +166,13 @@ def thread_worker(host):
 
 
 def gevent_worker(host, node, my_set):
+    """Individual gevent worker to ping a host from a specific node."""
     req_url = 'https://wepcc.com:443/check-ping.html'
     req_headers = {
         'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8'}
     param_body = f'node={node}&host={host}'
     try:
-        req = requests.post(url=req_url, data=param_body, headers=req_headers)
+        req = requests.post(url=req_url, data=param_body, headers=req_headers, timeout=5)
         if req.status_code == 200:
             try:
                 json_data = json.loads(req.content)
@@ -189,6 +196,7 @@ def gevent_worker(host, node, my_set):
 
 
 def parse_args():
+    """Parses command line arguments for input configuration."""
     parser = ArgumentParser(
         prog='morePing',
         formatter_class=RawTextHelpFormatter,
@@ -229,6 +237,7 @@ def parse_args():
 
 
 def check_args(args):
+    """Validates the input arguments to ensure correct file paths and targets."""
     if not args.host and not args.f:
         print('Args失踪!——请使用 --host baidu.com 或 -f host.txt 指定目标/Args missing! Use --host baidu.com or -f host.txt to specify targets')
         exit(-1)
@@ -238,6 +247,7 @@ def check_args(args):
 
 
 def main():
+    """Main function to initialize and run the scanning process."""
     args = parse_args()
     print('* MorePing v1.0  https://github.com/xq17/MorePing *')
     print('* 正在准备生成任务... / Preparing to generate tasks... *')
@@ -248,26 +258,45 @@ def main():
     print(f'创建 {thread_count} 个子进程.../Creating {thread_count} subprocesses...')
     scan_process = []
     print('报告线程正在运行.../Report thread is running...')
-    global STOP_THIS
+    global STOP_THIS, alive
     STOP_THIS = False
+    alive = True
 
-    threading.Thread(target=report_result).start()
+    # Start the result reporting thread
+    result_thread = threading.Thread(target=report_result)
+    result_thread.start()
+
     try:
         with alive_bar(target_count) as bar:
             for _ in range(thread_count):
-                t = threading.Thread(target=consumer, args=(bar,), daemon=True)
-                t.start()
-                scan_process.append(t)
-            print(f'{thread_count} 个子进程正在运行./{thread_count} subprocesses are running.')
-            for t in scan_process:
-                t.join()
+                thread = threading.Thread(target=consumer, args=(bar,))
+                thread.start()
+                scan_process.append(thread)
+
+            for thread in scan_process:
+                thread.join()
+
+        # Clean exit handling
+        STOP_THIS = True
+        alive = False
+        result_thread.join()
+
     except KeyboardInterrupt:
-        print('[+] 用户中止，子扫描进程已退出.../User interrupted, subprocesses exited...')
+        print('用户退出.../User exit...')
+        STOP_THIS = True
+        alive = False
+        for thread in scan_process:
+            thread.join()
+        time.sleep(1)
+        sys.exit(-1)
     except Exception as e:
         print(f'[主进程错误/Error in main process]: {type(e)} {e}')
+        STOP_THIS = True
+        alive = False
 
     STOP_THIS = True
-    time.sleep(1)
+    alive = False
+    time.sleep(0.5)
 
 
 if __name__ == '__main__':
