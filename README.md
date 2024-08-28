@@ -26,13 +26,13 @@ options:
 
 ```
 1.检查版本
-	python3 morePing.py -v
+	python3 main.py -v
 2.检查单机
-	python3 morePing.py --host baidu.com
+	python3 main.py --host baidu.com
 3.从常规文件中检查更多主机
-	python3 morePing.py -f hosts.txt -p 8
+	python3 main.py -f hosts.txt -p 8
 4. 检查主机是否有紊乱和混乱的文件 (定期自动匹配主机)
-	python3 morePing.py -f other.txt --force -p 8
+	python3 main.py -f other.txt --force -p 8
 ```
 ### update 
 * 增强线程和协程的管理逻辑，确保在异常情况下能够安全退出。
